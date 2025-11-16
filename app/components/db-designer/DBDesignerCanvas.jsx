@@ -1,3 +1,5 @@
+// component/DBDesignerCanvas.jsx (Complete Updated File)
+
 import { useState, useRef, useCallback, useEffect } from "react";
 
 import ReactFlow, {
@@ -10,6 +12,7 @@ import ReactFlow, {
   addEdge,
   MarkerType,
   useReactFlow,
+  getConnectedEdges,
 } from "reactflow";
 
 import "reactflow/dist/style.css";
@@ -18,19 +21,27 @@ import "reactflow/dist/style.css";
 import TableNode from "./nodes/TableNode";
 import Sidebar from "./sidebar/Sidebar";
 import SettingsPanel from "./settings/SettingsPanel";
+import InspectorPanel from "./inspector/InspectorPanel"; // NEW IMPORT
 import RelationModal from "./modals/RelationModal";
 import SQLModal from "./modals/SQLModal";
 import Notification from "./modals/Notification";
 import ConnectingEdge from "./edges/ConnectingEdge";
+import NoteNode from "./nodes/NoteNode"; // NEW IMPORT
 
 // Utils
 import generateSQL from "./utils/generateSQL";
 import { saveHistory, undo, redo } from "./utils/history";
+import { TEMPLATES } from "../db-designer/utils/TableTemplates"; // Corrected import path
 
 // Icons
 import { Save, Undo, Redo, ZoomIn, ZoomOut, Maximize2, Settings } from "lucide-react";
 
-const nodeTypes = { tableNode: TableNode };
+const nodeTypes = { tableNode: TableNode, noteNode: NoteNode };
+
+// --- Drag and Drop Logic ---
+let id = 0;
+const getId = () => `dndnode_${id++}`;
+// ---------------------------
 
 export default function DBDesignerCanvas() {
   // Basic states
@@ -39,6 +50,9 @@ export default function DBDesignerCanvas() {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isRelationMode, setIsRelationMode] = useState(false);
+  
+  // Feature 11: Inspector state
+  const [selectedNode, setSelectedNode] = useState(null); 
 
   const [selectedTable, setSelectedTable] = useState(null);
   const [pendingRelation, setPendingRelation] = useState(null);
@@ -56,7 +70,7 @@ export default function DBDesignerCanvas() {
   const [sourcePos, setSourcePos] = useState(null);
 
   const reactFlowWrapper = useRef(null);
-  const { zoomIn, zoomOut, fitView } = useReactFlow();
+  const { zoomIn, zoomOut, fitView, project } = useReactFlow();
 
   // Notification
   const showMsg = (msg, type = "info") => {
@@ -70,6 +84,58 @@ export default function DBDesignerCanvas() {
     setHistory(newHist);
     setHistoryIndex(index);
   };
+  const handleDeleteNode = (id) => {
+    setNodes((nds) => {
+      const nodeToDelete = nds.find(n => n.id === id);
+      if (!nodeToDelete) return nds;
+
+      // Only delete connecting edges if it's a table (tables have handles)
+      const isTable = nodeToDelete.type === 'tableNode';
+
+      let e = edges;
+      if (isTable) {
+        const connectedEdges = edges.filter(
+          (edge) => edge.source === id || edge.target === id
+        );
+        e = edges.filter((edge) => !connectedEdges.includes(edge));
+        setEdges(e);
+      }
+      
+      const n = nds.filter((x) => x.id !== id);
+
+      pushHistory(n, e);
+      setSelectedNode(null); // Deselect if deleted
+      showMsg(`${nodeToDelete.data.label || 'Item'} Deleted`, "warning");
+      return n;
+    });
+  };
+  const handleAddNote = () => {
+    const noteId = getId();
+    const newNote = {
+      id: `note-${noteId}`,
+      type: "noteNode",
+      position: { x: 50 + Math.random() * 100, y: 50 + Math.random() * 100 },
+      data: {
+        nodeId: `note-${noteId}`,
+        label: `Note ${nodes.length + 1}`, // Internal label
+        content: "Double click to start documentation...",
+        color: '#fde047',
+        onUpdate: handleUpdateNode,
+        onDelete: handleDeleteNode,
+      },
+      // Ensure notes don't interfere with connections
+      isConnectable: false, 
+      draggable: true,
+      selectable: true,
+    };
+    
+    const updated = [...nodes, newNote];
+    setNodes(updated);
+    pushHistory(updated, edges);
+    showMsg("Sticky Note Added", "success");
+  };
+
+
 
   // Undo / Redo
   const handleUndo = () => {
@@ -110,15 +176,22 @@ export default function DBDesignerCanvas() {
     [nodes, edges]
   );
 
-  // Add Table
-  const handleAddTable = () => {
+  // Add Table (Handles both empty and template)
+  const handleAddTable = (template = null) => {
+    const tableId = getId();
+    const tableLabel = template ? template.label : `Table_${nodes.length + 1}`;
+    const tableColumns = template ? template.columns : [{ id: Date.now(), name: "id", type: "INT", isPrimary: true }];
+    const tableColor = template ? template.color : undefined;
+
     const newTable = {
-      id: `table-${Date.now()}`,
+      id: `table-${tableId}`,
       type: "tableNode",
       position: { x: 200 + Math.random() * 200, y: 100 + Math.random() * 200 },
       data: {
-        label: `Table_${nodes.length + 1}`,
-        columns: [{ id: Date.now(), name: "id", type: "INT", isPrimary: true }],
+        nodeId: `table-${tableId}`,
+        label: tableLabel,
+        columns: tableColumns,
+        color: tableColor, // Passed color
         onUpdate: handleUpdateNode,
         onDelete: handleDeleteTable,
         onDuplicate: handleDuplicateTable,
@@ -129,7 +202,7 @@ export default function DBDesignerCanvas() {
     const updated = [...nodes, newTable];
     setNodes(updated);
     pushHistory(updated, edges);
-    showMsg("Table Added", "success");
+    showMsg(`${tableLabel} Table Added`, "success");
   };
 
   // Update Table Node
@@ -139,40 +212,66 @@ export default function DBDesignerCanvas() {
     );
     setNodes(updated);
     pushHistory(updated, edges);
+    if (selectedNode && selectedNode.id === nodeId) {
+      setSelectedNode(updated.find(n => n.id === nodeId));
+    }
   };
 
   // Delete Table
   const handleDeleteTable = (id) => {
-    const n = nodes.filter((x) => x.id !== id);
-    const e = edges.filter((x) => x.source !== id && x.target !== id);
+    setNodes((nds) => {
+      const nodeToDelete = nds.find(n => n.id === id);
+      if (!nodeToDelete) return nds;
 
-    setNodes(n);
-    setEdges(e);
-    pushHistory(n, e);
-    showMsg("Table Deleted", "warning");
+      const connectedEdges = edges.filter(
+        (e) => e.source === id || e.target === id
+      );
+
+      const n = nds.filter((x) => x.id !== id);
+      const e = edges.filter((x) => !connectedEdges.includes(x));
+
+      setEdges(e);
+      pushHistory(n, e);
+      setSelectedNode(null); // Deselect if deleted
+      showMsg("Table Deleted", "warning");
+      return n;
+    });
   };
 
   // Duplicate Table
   const handleDuplicateTable = (id) => {
     const src = nodes.find((n) => n.id === id);
     if (!src) return;
+  
+    // deep clone columns array
+    const clonedColumns = src.data.columns.map(col => ({ ...col, id: Date.now() + Math.random() }));
+  
+    const newNodeId = `table-${getId()}`;
 
     const dup = {
       ...src,
-      id: `table-${Date.now()}`,
-      position: { x: src.position.x + 50, y: src.position.y + 50 },
-      data: { ...src.data, label: src.data.label + "_copy" },
+      id: newNodeId,
+      position: { x: src.position.x + 60, y: src.position.y + 60 },
+      data: {
+        ...src.data,
+        nodeId: newNodeId,
+        label: src.data.label + "_copy",
+        columns: clonedColumns,
+        isHighlighted: false
+      }
     };
-
+  
     const newNodes = [...nodes, dup];
+  
     setNodes(newNodes);
     pushHistory(newNodes, edges);
     showMsg("Duplicated", "success");
   };
-
+  
   // Relation Mode On/Off
   const handleRelationMode = () => {
     setIsRelationMode((prev) => !prev);
+    setSelectedNode(null); // Close inspector when entering relation mode
 
     if (!isRelationMode) {
       showMsg("Select first table", "info");
@@ -188,38 +287,49 @@ export default function DBDesignerCanvas() {
     }
   };
 
-  // Node Click Handler
+  // Node Click Handler (Used for Relation Mode)
   const onNodeClick = (evt, node) => {
-    if (!isRelationMode) return;
-
-    if (!selectedTable) {
-      setSelectedTable(node.id);
-
-      const rect = evt.target.getBoundingClientRect();
-      setSourcePos({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-
-      showMsg("Select second table", "info");
-
-      setNodes((nds) =>
-        nds.map((n) => ({
-          ...n,
-          data: { ...n.data, isHighlighted: n.id !== node.id },
-        }))
-      );
-    } else if (node.id !== selectedTable) {
-      const src = nodes.find((n) => n.id === selectedTable);
-
-      setPendingRelation({
-        source: selectedTable,
-        target: node.id,
-        sourceLabel: src.data.label,
-        targetLabel: node.data.label,
-      });
-
-      setShowRelationModal(true);
-      setSourcePos(null);
+    if (isRelationMode) {
+        if (!selectedTable) {
+            setSelectedTable(node.id);
+            const nodeEl = evt.currentTarget;
+            const rect = nodeEl.getBoundingClientRect();
+            setSourcePos({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+            showMsg("Select second table", "info");
+            setNodes((nds) =>
+                nds.map((n) => ({
+                    ...n,
+                    data: { ...n.data, isHighlighted: n.id !== node.id },
+                }))
+            );
+        } else if (node.id !== selectedTable) {
+            const src = nodes.find((n) => n.id === selectedTable);
+            setPendingRelation({
+                source: selectedTable,
+                target: node.id,
+                sourceLabel: src.data.label,
+                targetLabel: node.data.label,
+            });
+            setShowRelationModal(true);
+            setSourcePos(null);
+        }
     }
   };
+  
+  // Node Context Menu Handler (Used for Inspector Selection - Feature 11)
+  const onNodeContextMenu = useCallback((event, node) => {
+    event.preventDefault(); // Prevent browser context menu
+    
+    // Toggle/Select for Inspector
+    const isSelected = node.id === selectedNode?.id;
+
+    // Deselect all other nodes visually
+    setNodes(nds => nds.map(n => ({ ...n, selected: n.id === node.id && !isSelected })));
+    
+    // Set Inspector State
+    setSelectedNode(isSelected ? null : node);
+    
+  }, [setNodes, selectedNode]);
 
   // Apply Relation
   const handleRelationSelect = (type, relationName, cardinality) => {
@@ -263,6 +373,7 @@ export default function DBDesignerCanvas() {
     setIsRelationMode(false);
     setSelectedTable(null);
     setPendingRelation(null);
+    setSourcePos(null);
 
     setNodes((nds) =>
       nds.map((n) => ({ ...n, data: { ...n.data, isHighlighted: false } }))
@@ -303,7 +414,7 @@ export default function DBDesignerCanvas() {
         id: n.id,
         type: n.type,
         position: n.position,
-        data: { label: n.data.label, columns: n.data.columns },
+        data: { label: n.data.label, columns: n.data.columns, color: n.data.color, notes: n.data.notes }, // Included notes
       })),
       edges,
     };
@@ -354,11 +465,60 @@ export default function DBDesignerCanvas() {
     input.click();
   };
 
-  // Mouse move for relation line
+  // Mouse move (only for relation line now)
   const handleMove = (e) => {
-    if (isRelationMode && selectedTable)
+    if (isRelationMode && selectedTable) {
       setMousePos({ x: e.clientX, y: e.clientY });
+    }
   };
+
+  // --- DND Handlers ---
+  const onDragOver = useCallback((event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
+
+  const onDrop = useCallback(
+    (event) => {
+      event.preventDefault();
+
+      const reactFlowBounds = reactFlowWrapper.current.getBoundingClientRect();
+      const type = event.dataTransfer.getData("application/reactflow");
+      const templateId = event.dataTransfer.getData("templateId");
+
+      if (type === "templateNode" && templateId) {
+        const template = TEMPLATES.find((t) => t.id === templateId);
+        if (template) {
+          const position = project({
+            x: event.clientX - reactFlowBounds.left,
+            y: event.clientY - reactFlowBounds.top,
+          });
+
+          const newNode = {
+            id: `table-${getId()}`,
+            type: "tableNode",
+            position,
+            data: {
+              nodeId: `table-${getId()}`,
+              label: template.label,
+              columns: template.columns,
+              color: template.color,
+              onUpdate: handleUpdateNode,
+              onDelete: handleDeleteTable,
+              onDuplicate: handleDuplicateTable,
+              isHighlighted: false,
+            },
+          };
+
+          const newNodes = [...nodes, newNode];
+          setNodes(newNodes);
+          pushHistory(newNodes, edges);
+          showMsg(`${template.label} Template Added`, "success");
+        }
+      }
+    },
+    [nodes, edges, project]
+  );
 
   // Hotkeys
   useEffect(() => {
@@ -385,9 +545,10 @@ export default function DBDesignerCanvas() {
     <div className="flex h-screen bg-slate-950" onMouseMove={handleMove}>
       {/* Sidebar */}
       <Sidebar
-        onAddTable={handleAddTable}
+        onAddTable={() => handleAddTable()}
         onRelationMode={handleRelationMode}
         isRelationMode={isRelationMode}
+        onAddNote={handleAddNote}
         onAutoLayout={handleAutoLayout}
         onGenerateSQL={handleGenerateSQL}
       />
@@ -395,13 +556,17 @@ export default function DBDesignerCanvas() {
       {/* Canvas */}
       <div className="flex-1 relative" ref={reactFlowWrapper}>
         <ReactFlow
+          attributionPosition={null}
           nodes={nodes}
           edges={edges}
           onNodeClick={onNodeClick}
+          onNodeContextMenu={onNodeContextMenu} // Feature 11: Inspector trigger
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           nodeTypes={nodeTypes}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
           fitView
           className="bg-slate-950"
         >
@@ -412,38 +577,26 @@ export default function DBDesignerCanvas() {
 
         {/* Connecting Line */}
         {isRelationMode && sourcePos && mousePos && (
-          <ConnectingEdge sourceNode={sourcePos} mousePosition={mousePos} />
+          <ConnectingEdge sourceNode={project(sourcePos)} mousePosition={mousePos} />
         )}
 
         {/* Top Toolbar */}
         <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-800/90 px-4 py-2 rounded-lg flex gap-2 border border-slate-700 shadow-lg z-20">
-          <button
-            onClick={handleUndo}
-            className="p-2 text-white hover:bg-slate-700 rounded"
-          >
+          <button onClick={handleUndo} className="p-2 text-white hover:bg-slate-700 rounded">
             <Undo className="w-4 h-4" />
           </button>
 
-          <button
-            onClick={handleRedo}
-            className="p-2 text-white hover:bg-slate-700 rounded"
-          >
+          <button onClick={handleRedo} className="p-2 text-white hover:bg-slate-700 rounded">
             <Redo className="w-4 h-4" />
           </button>
 
           <div className="w-px h-6 bg-slate-600 mx-1" />
 
-          <button
-            onClick={zoomIn}
-            className="p-2 text-white hover:bg-slate-700 rounded"
-          >
+          <button onClick={zoomIn} className="p-2 text-white hover:bg-slate-700 rounded">
             <ZoomIn className="w-4 h-4" />
           </button>
 
-          <button
-            onClick={zoomOut}
-            className="p-2 text-white hover:bg-slate-700 rounded"
-          >
+          <button onClick={zoomOut} className="p-2 text-white hover:bg-slate-700 rounded">
             <ZoomOut className="w-4 h-4" />
           </button>
 
@@ -456,32 +609,43 @@ export default function DBDesignerCanvas() {
 
           <div className="w-px h-6 bg-slate-600 mx-1" />
 
-          <button
-            onClick={handleExport}
-            className="p-2 text-white hover:bg-slate-700 rounded"
-          >
+          <button onClick={handleExport} className="p-2 text-white hover:bg-slate-700 rounded">
             <Save className="w-4 h-4" />
           </button>
         </div>
 
-        {/* Settings Button */}
+        {/* Settings Button (Will open Inspector if a node is selected) */}
         <button
-          onClick={() => setSettingsOpen(!settingsOpen)}
-          className="absolute top-4 right-4 bg-slate-800 hover:bg-slate-700 p-3 text-white rounded-lg shadow-lg z-20"
+          onClick={() => selectedNode ? setSelectedNode(null) : setSettingsOpen(!settingsOpen)}
+          className={`absolute top-4 right-4 p-3 text-white rounded-lg shadow-lg z-20 transition-colors ${
+            selectedNode ? 'bg-red-600 hover:bg-red-700' : 'bg-slate-800 hover:bg-slate-700'
+          }`}
+          title={selectedNode ? "Close Inspector" : "Open Settings"}
         >
-          <Settings className="w-6 h-6" />
+          {selectedNode ? <X className="w-6 h-6" /> : <Settings className="w-6 h-6" />}
         </button>
       </div>
-
-      {/* Settings Panel */}
-      <SettingsPanel
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+      
+      {/* Feature 11: Inspector Panel */}
+      <InspectorPanel
+        selectedNode={selectedNode}
+        onUpdateNode={handleUpdateNode}
+        onClose={() => setSelectedNode(null)}
         nodes={nodes}
         edges={edges}
-        onExport={handleExport}
-        onImport={handleImport}
       />
+
+      {/* Settings Panel (Visible only if no node is selected AND isOpen is true) */}
+      {!selectedNode && (
+        <SettingsPanel
+          isOpen={settingsOpen}
+          onClose={() => setSettingsOpen(false)}
+          nodes={nodes}
+          edges={edges}
+          onExport={handleExport}
+          onImport={handleImport}
+        />
+      )}
 
       {/* Relation Modal */}
       <RelationModal
@@ -493,11 +657,7 @@ export default function DBDesignerCanvas() {
       />
 
       {/* SQL Modal */}
-      <SQLModal
-        isOpen={sqlModal}
-        onClose={() => setSQLModal(false)}
-        sql={sqlOutput}
-      />
+      <SQLModal isOpen={sqlModal} onClose={() => setSQLModal(false)} sql={sqlOutput} />
 
       {/* Notification */}
       <Notification message={notification.message} type={notification.type} />
