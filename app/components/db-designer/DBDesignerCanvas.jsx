@@ -31,7 +31,7 @@ import NoteNode from "./nodes/NoteNode"; // NEW IMPORT
 // Utils
 import generateSQL from "./utils/generateSQL";
 import { saveHistory, undo, redo } from "./utils/history";
-import { TEMPLATES } from "../db-designer/utils/TableTemplates"; // Corrected import path
+import { TEMPLATES } from "./utils/TableTemplates"; // Corrected import path
 
 // Icons
 import { Save, Undo, Redo, ZoomIn, ZoomOut, Maximize2, Settings } from "lucide-react";
